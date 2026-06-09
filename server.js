@@ -31,10 +31,17 @@ let SESSION = {
   loginTime: null,
 };
 
-// ============================================================
-//  VOLUME HISTORY (for spike detection)
-// ============================================================
-let VOLUME_HISTORY = {};
+let MASTER = [];
+
+async function loadMaster() {
+  const res = await axios.get(
+    'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json'
+  );
+
+  MASTER = res.data;
+
+  console.log('Master Loaded:', MASTER.length);
+}
 
 // ============================================================
 //  TOTP AUTO-GENERATE
@@ -161,19 +168,191 @@ async function fetchNiftySpot() {
 }
 
 // ============================================================
-//  SEARCH OPTION SYMBOL TOKEN
-//  Angel One ka symbol search — strike ke liye token milega
+//  FIND OPTION FROM MASTER
 // ============================================================
-async function searchSymbolToken(symbol) {
-  await ensureLoggedIn();
-  const res = await axios.get(
-    `${ANGEL_BASE}/rest/secure/angelbroking/order/v1/searchScrip?exchange=NFO&searchscrip=${encodeURIComponent(symbol)}`,
-    { headers: getHeaders() }
+function findOption(strike, type) {
+  const items = MASTER.filter(
+    x =>
+      x.name === 'NIFTY' &&
+      x.instrumenttype === 'OPTIDX' &&
+      x.symbol.endsWith(type)
   );
-  if (res.data.data && res.data.data.length > 0) {
-    return res.data.data[0].symboltoken;
-  }
-  return null;
+
+  const expiries = [
+    ...new Set(items.map(x => x.expiry))
+  ].sort((a, b) => new Date(a) - new Date(b));
+
+  const nearestExpiry = expiries[0];
+
+  return items.find(
+    x =>
+      x.expiry === nearestExpiry &&
+      Number(x.strike) / 100 === strike &&
+      x.symbol.endsWith(type)
+  );
+}
+
+function computeStrengthScores(options) {
+  const maxVolume = Math.max(...options.map(o => o.volume || 0), 1);
+  const maxOi = Math.max(...options.map(o => o.oi || 0), 1);
+
+  return options.map(opt => {
+    const ratio = opt.askQty > 0 ? opt.bidQty / opt.askQty : opt.bidQty;
+    const ratioScore = Math.min(ratio, 5) / 5;
+    const volumeScore = Math.min(opt.volume / maxVolume, 1);
+    const oiScore = Math.min(opt.oi / maxOi, 1);
+    const strengthScore = ratioScore * 0.45 + volumeScore * 0.35 + oiScore * 0.2;
+
+    return {
+      ...opt,
+      strengthScore: parseFloat(strengthScore.toFixed(3)),
+      ratioScore: parseFloat(ratioScore.toFixed(3)),
+      volumeScore: parseFloat(volumeScore.toFixed(3)),
+      oiScore: parseFloat(oiScore.toFixed(3)),
+    };
+  });
+}
+
+function computeSideMetrics(totals) {
+  const { bidQty, askQty, volume, oi } = totals;
+  const ratio = askQty > 0 ? bidQty / askQty : bidQty;
+  return {
+    bidQty,
+    askQty,
+    volume,
+    oi,
+    ratio: parseFloat(ratio.toFixed(3)),
+    sellerPressure: askQty > bidQty,
+    buyerPressure: bidQty > askQty,
+  };
+}
+
+function aggregateTotals(options) {
+  const sideTotals = { CE: { bidQty: 0, askQty: 0, volume: 0, oi: 0 }, PE: { bidQty: 0, askQty: 0, volume: 0, oi: 0 } };
+  const tierTotals = { atm: { CE: { bidQty: 0, askQty: 0, volume: 0, oi: 0 }, PE: { bidQty: 0, askQty: 0, volume: 0, oi: 0 } }, itm1: { CE: { bidQty: 0, askQty: 0, volume: 0, oi: 0 }, PE: { bidQty: 0, askQty: 0, volume: 0, oi: 0 } } };
+
+  options.forEach(opt => {
+    if (!sideTotals[opt.type]) return;
+    sideTotals[opt.type].bidQty += opt.bidQty;
+    sideTotals[opt.type].askQty += opt.askQty;
+    sideTotals[opt.type].volume += opt.volume;
+    sideTotals[opt.type].oi += opt.oi;
+    if (tierTotals[opt.tier] && tierTotals[opt.tier][opt.type]) {
+      tierTotals[opt.tier][opt.type].bidQty += opt.bidQty;
+      tierTotals[opt.tier][opt.type].askQty += opt.askQty;
+      tierTotals[opt.tier][opt.type].volume += opt.volume;
+      tierTotals[opt.tier][opt.type].oi += opt.oi;
+    }
+  });
+
+  return {
+    side: {
+      CE: computeSideMetrics(sideTotals.CE),
+      PE: computeSideMetrics(sideTotals.PE),
+    },
+    tier: {
+      atm: {
+        CE: computeSideMetrics(tierTotals.atm.CE),
+        PE: computeSideMetrics(tierTotals.atm.PE),
+      },
+      itm1: {
+        CE: computeSideMetrics(tierTotals.itm1.CE),
+        PE: computeSideMetrics(tierTotals.itm1.PE),
+      },
+    },
+  };
+}
+
+function computeStrikeTotals(options) {
+  const strikeMap = {};
+
+  options.forEach(opt => {
+    const key = String(opt.strike);
+    if (!strikeMap[key]) {
+      strikeMap[key] = {
+        strike: opt.strike,
+        totals: { bidQty: 0, askQty: 0, volume: 0, oi: 0 },
+        typeTotals: {
+          CE: { bidQty: 0, askQty: 0, volume: 0, oi: 0 },
+          PE: { bidQty: 0, askQty: 0, volume: 0, oi: 0 },
+        },
+        options: [],
+      };
+    }
+
+    const strike = strikeMap[key];
+    strike.totals.bidQty += opt.bidQty;
+    strike.totals.askQty += opt.askQty;
+    strike.totals.volume += opt.volume;
+    strike.totals.oi += opt.oi;
+    if (strike.typeTotals[opt.type]) {
+      strike.typeTotals[opt.type].bidQty += opt.bidQty;
+      strike.typeTotals[opt.type].askQty += opt.askQty;
+      strike.typeTotals[opt.type].volume += opt.volume;
+      strike.typeTotals[opt.type].oi += opt.oi;
+    }
+    strike.options.push(opt);
+  });
+
+  return Object.values(strikeMap).map(strike => ({
+    strike: strike.strike,
+    totals: strike.totals,
+    typeTotals: {
+      CE: computeSideMetrics(strike.typeTotals.CE),
+      PE: computeSideMetrics(strike.typeTotals.PE),
+    },
+    options: strike.options.map(opt => ({
+      label: opt.label,
+      type: opt.type,
+      tier: opt.tier,
+      strike: opt.strike,
+      bidQty: opt.bidQty,
+      askQty: opt.askQty,
+      volume: opt.volume,
+      oi: opt.oi,
+      ratio: opt.ratio,
+      strengthScore: opt.strengthScore,
+    })),
+  }));
+}
+
+function buildTradeSuggestion(options) {
+  const aggregates = aggregateTotals(options);
+  const strikeTotals = computeStrikeTotals(options);
+
+  const strongestOption = options.reduce((best, opt) => {
+    return !best || opt.strengthScore > best.strengthScore ? opt : best;
+  }, null);
+
+  const suggestedAction = strongestOption
+    ? strongestOption.type === 'CE' ? 'BUY CALLS' : 'BUY PUTS'
+    : 'NO CLEAR TREND';
+
+  const reason = strongestOption
+    ? `${strongestOption.label} is strongest: strength ${strongestOption.strengthScore}, ratio ${strongestOption.ratio}, volume ${strongestOption.volume.toLocaleString()}, OI ${strongestOption.oi.toLocaleString()}`
+    : 'Unable to determine a clear strongest option from the available strikes.';
+
+  return {
+    aggregates,
+    strikeTotals,
+    strongestOption: strongestOption ? {
+      label: strongestOption.label,
+      strike: strongestOption.strike,
+      type: strongestOption.type,
+      tier: strongestOption.tier,
+      symbol: strongestOption.symbol,
+      strengthScore: strongestOption.strengthScore,
+      ratio: strongestOption.ratio,
+      volume: strongestOption.volume,
+      oi: strongestOption.oi,
+    } : null,
+    suggestedAction,
+    reason,
+    riskPoints: 15,
+    rewardPoints: 30,
+    riskReward: '1:2',
+    virtualTrade: !!strongestOption,
+  };
 }
 
 // ============================================================
@@ -228,194 +407,6 @@ function getATMStrike(spot) {
 }
 
 // ============================================================
-//  VOLUME SPIKE DETECTION
-// ============================================================
-function detectVolumeSpike(symbol, currentVolume, avgVolume) {
-  if (!VOLUME_HISTORY[symbol]) {
-    VOLUME_HISTORY[symbol] = [];
-  }
-
-  const history = VOLUME_HISTORY[symbol];
-  history.push(currentVolume);
-
-  if (history.length > 10) {
-    history.shift();
-  }
-
-  const avgOfHistory = history.reduce((a, b) => a + b, 0) / history.length;
-  const isSpike = currentVolume > (avgOfHistory * 1.5) || currentVolume > (avgVolume * 2);
-  const spikePercentage = avgOfHistory > 0 ? 
-    Math.round(((currentVolume - avgOfHistory) / avgOfHistory) * 100) : 0;
-
-  return {
-    isSpike,
-    spikePercentage,
-    currentVolume,
-    avgVolume,
-    historyAvg: parseFloat(avgOfHistory.toFixed(2))
-  };
-}
-
-// ============================================================
-//  CALL vs PUT STRENGTH ANALYZER
-// ============================================================
-function analyzeCallVsPutStrength(atmStrike, callData, putData) {
-  // Bid-Ask Ratio
-  const callBidAskRatio = callData.askQty > 0 
-    ? parseFloat((callData.bidQty / callData.askQty).toFixed(3))
-    : 0;
-  
-  const putBidAskRatio = putData.askQty > 0 
-    ? parseFloat((putData.bidQty / putData.askQty).toFixed(3))
-    : 0;
-
-  // Volume Analysis
-  const callVolume = callData.volume || 0;
-  const putVolume = putData.volume || 0;
-  const volumeRatio = putVolume > 0 
-    ? parseFloat((callVolume / putVolume).toFixed(3))
-    : 0;
-
-  // OI Analysis
-  const callOI = callData.oi || 0;
-  const putOI = putData.oi || 0;
-  const oiRatio = putOI > 0 
-    ? parseFloat((callOI / putOI).toFixed(3))
-    : 0;
-
-  // Volume Spike Detection
-  const callVolumeSpike = detectVolumeSpike('CALL_' + atmStrike, callVolume, callData.avgVolume || 0);
-  const putVolumeSpike = detectVolumeSpike('PUT_' + atmStrike, putVolume, putData.avgVolume || 0);
-
-  // Scoring System
-  let callScore = 0;
-  let putScore = 0;
-
-  if (callBidAskRatio > 1.2) {
-    callScore += 3;
-  } else if (callBidAskRatio < 0.8) {
-    putScore += 3;
-  }
-
-  if (volumeRatio > 1.3) {
-    callScore += 3;
-  } else if (volumeRatio < 0.7) {
-    putScore += 3;
-  }
-
-  if (oiRatio > 1.3) {
-    callScore += 4;
-  } else if (oiRatio < 0.7) {
-    putScore += 4;
-  }
-
-  if (callVolumeSpike.isSpike) {
-    callScore += 2;
-  }
-  if (putVolumeSpike.isSpike) {
-    putScore += 2;
-  }
-
-  const strongerSide = callScore > putScore ? 'CALL' : 'PUT';
-  const strength = Math.abs(callScore - putScore);
-
-  let strengthLevel = 'NEUTRAL';
-  if (strength >= 8) strengthLevel = '🔴 VERY STRONG';
-  else if (strength >= 5) strengthLevel = '🟠 STRONG';
-  else if (strength >= 2) strengthLevel = '🟡 MODERATE';
-  else strengthLevel = '⚪ WEAK';
-
-  return {
-    strongerSide,
-    callScore,
-    putScore,
-    strengthLevel,
-    analysis: {
-      bidAsk: {
-        call: callBidAskRatio,
-        put: putBidAskRatio,
-        winner: callBidAskRatio > putBidAskRatio ? 'CALL' : 'PUT',
-        signal: callBidAskRatio > 1 ? '✅ BUYERS' : '❌ SELLERS'
-      },
-      volume: {
-        call: callVolume,
-        put: putVolume,
-        ratio: volumeRatio,
-        winner: volumeRatio > 1 ? 'CALL' : 'PUT',
-        signal: volumeRatio > 1 ? '✅ CALL STRONG' : '❌ PUT STRONG'
-      },
-      oi: {
-        call: callOI,
-        put: putOI,
-        ratio: oiRatio,
-        winner: oiRatio > 1 ? 'CALL' : 'PUT',
-        signal: oiRatio > 1 ? '✅ CALL BUILDUP' : '❌ PUT BUILDUP'
-      },
-      volumeSpike: {
-        call: callVolumeSpike,
-        put: putVolumeSpike,
-        callSpiked: callVolumeSpike.isSpike,
-        putSpiked: putVolumeSpike.isSpike
-      }
-    }
-  };
-}
-
-// ============================================================
-//  GENERATE TRADING SIGNAL
-// ============================================================
-function generateTradingSignal(spot, atmStrike, analysis, callPrice, putPrice) {
-  const strongerSide = analysis.strongerSide;
-  const strengthLevel = analysis.strengthLevel;
-
-  let signal = {};
-
-  if (strongerSide === 'CALL') {
-    signal = {
-      direction: '📈 CALL (BULLISH)',
-      strength: strengthLevel,
-      strikePrice: atmStrike,
-      spotPrice: spot,
-      entry: parseFloat(callPrice.toFixed(2)),
-      stopLoss: parseFloat((callPrice - 15).toFixed(2)),
-      target: parseFloat((callPrice + 30).toFixed(2)),
-      maxLoss: 15,
-      maxProfit: 30,
-      riskRewardRatio: 2.0,
-      message: '☎️ BUY CALL - Strong indicators detected!',
-      tradeSetup: {
-        quantity: 50,
-        totalEntry: (callPrice * 50).toFixed(2),
-        totalSL: (15 * 50).toFixed(2),
-        totalTarget: (30 * 50).toFixed(2)
-      }
-    };
-  } else {
-    signal = {
-      direction: '📉 PUT (BEARISH)',
-      strength: strengthLevel,
-      strikePrice: atmStrike,
-      spotPrice: spot,
-      entry: parseFloat(putPrice.toFixed(2)),
-      stopLoss: parseFloat((putPrice - 15).toFixed(2)),
-      target: parseFloat((putPrice + 30).toFixed(2)),
-      maxLoss: 15,
-      maxProfit: 30,
-      riskRewardRatio: 2.0,
-      message: '📱 BUY PUT - Strong indicators detected!',
-      tradeSetup: {
-        quantity: 50,
-        totalEntry: (putPrice * 50).toFixed(2),
-        totalSL: (15 * 50).toFixed(2),
-        totalTarget: (30 * 50).toFixed(2)
-      }
-    };
-  }
-
-  return signal;
-}
-
-// ============================================================
 //  API ROUTE: /api/marketdata
 //  Dashboard yahan se data fetch karega
 // ============================================================
@@ -435,13 +426,15 @@ app.get('/api/marketdata', async (req, res) => {
       { label: '1 ITM PE', strike: itm1Pe, type: 'PE', tier: 'itm1' },
     ];
 
-    // 3. Search tokens for each symbol
+    // 3. Find tokens for each option
     const tokenMap = {};
     for (const c of contracts) {
-      const sym = buildOptionSymbol(c.strike, c.type);
-      const token = await searchSymbolToken(sym);
-      if (token) {
-        tokenMap[token] = { ...c, symbol: sym };
+      const option = findOption(c.strike, c.type);
+      if (option) {
+        tokenMap[option.token] = {
+          ...c,
+          symbol: option.symbol,
+        };
       }
     }
 
@@ -453,19 +446,42 @@ app.get('/api/marketdata', async (req, res) => {
 
     // 4. Fetch full market data
     const optionData = await fetchOptionData(tokens);
+    const debug = req.query.debug === '1' || req.query.debug === 'true';
 
-    // 5. Build response with volume spike and analysis
-    const options = optionData.map(opt => {
+    function sumDepthQty(entries) {
+      if (!Array.isArray(entries)) return 0;
+      return entries.reduce((sum, item) => sum + (Number(item?.quantity) || 0), 0);
+    }
+
+    function describeDepth(entries) {
+      if (!Array.isArray(entries)) return { count: 0, total: 0, levels: [] };
+      const levels = entries.map(item => ({ price: item?.price || null, quantity: Number(item?.quantity) || 0 }));
+      return {
+        count: levels.length,
+        total: levels.reduce((sum, level) => sum + level.quantity, 0),
+        levels,
+      };
+    }
+
+    // 5. Build response with strength scoring
+    const rawOptions = optionData.map(opt => {
       const meta = tokenMap[opt.symbolToken] || {};
-      const bidQty = opt.depth?.buy?.[0]?.quantity || 0;
-      const askQty = opt.depth?.sell?.[0]?.quantity || 0;
+      const bidDepth = describeDepth(opt.depth?.buy);
+      const askDepth = describeDepth(opt.depth?.sell);
+      const bidQty = bidDepth.total;
+      const askQty = askDepth.total;
       const ratio = askQty > 0 ? parseFloat((bidQty / askQty).toFixed(3)) : 0;
-      const volumeSpike = opt.tradeVolume > opt.averageTradedPrice * 100;
       const priceChange = parseFloat((opt.ltp - opt.close).toFixed(2));
       const pctChange = opt.close > 0
         ? parseFloat(((priceChange / opt.close) * 100).toFixed(2))
         : 0;
 
+      if (debug) {
+        console.log(`DEBUG ${meta.label || opt.symbolToken}: buyCount=${bidDepth.count} buyTotal=${bidQty} sellCount=${askDepth.count} sellTotal=${askQty}`);
+      }
+
+      const volume = Number(opt.tradeVolume || opt.volume || 0);
+      const oi = Number(opt.opnInterest || opt.openInterest || opt.oi || 0);
       return {
         label: meta.label,
         tier: meta.tier,
@@ -477,18 +493,25 @@ app.get('/api/marketdata', async (req, res) => {
         bidQty,
         askQty,
         ratio,
-        volume: opt.tradeVolume,
-        avgVolume: opt.averageTradedPrice * 100,
-        volumeSpike: opt.tradeVolume > (opt.averageTradedPrice * 100),
+        volume,
+        avgVolume: Number(opt.averageTradedPrice || 0) * 100,
+        volumeSpike: volume > (Number(opt.averageTradedPrice || 0) * 100),
         priceChange,
         pctChange,
         high: opt.high,
         low: opt.low,
-        oi: opt.opnInterest,
+        oi,
+        bidDepthCount: bidDepth.count,
+        askDepthCount: askDepth.count,
+        bidDepthLevels: debug ? bidDepth.levels : undefined,
+        askDepthLevels: debug ? askDepth.levels : undefined,
       };
     });
 
-    return res.json({ success: true, spot, atm, options });
+    const options = computeStrengthScores(rawOptions);
+    const suggestion = buildTradeSuggestion(options);
+
+    return res.json({ success: true, spot, atm, options, suggestion });
 
   } catch (err) {
     console.error('Market data error:', err.message);
@@ -499,110 +522,6 @@ app.get('/api/marketdata', async (req, res) => {
       return res.json({ success: false, message: 'Session expired — retrying login. Refresh in 5 seconds.' });
     }
 
-    return res.json({ success: false, message: err.message });
-  }
-});
-
-// ============================================================
-//  API ROUTE: /api/tradeSignal (NEW - MAIN ROUTE)
-// ============================================================
-app.get('/api/tradeSignal', async (req, res) => {
-  try {
-    console.log('📊 Fetching trade signal...');
-
-    // 1. Fetch NIFTY spot
-    const spot = await fetchNiftySpot();
-    const atm = getATMStrike(spot);
-
-    console.log(`NIFTY Spot: ${spot}, ATM: ${atm}`);
-
-    // 2. Build ATM Call & Put symbols
-    const callSymbol = buildOptionSymbol(atm, 'CE');
-    const putSymbol = buildOptionSymbol(atm, 'PE');
-
-    console.log(`Call: ${callSymbol}, Put: ${putSymbol}`);
-
-    // 3. Search tokens
-    const callToken = await searchSymbolToken(callSymbol);
-    const putToken = await searchSymbolToken(putSymbol);
-
-    if (!callToken || !putToken) {
-      return res.json({ 
-        success: false, 
-        message: '❌ Option tokens not found - market may be closed' 
-      });
-    }
-
-    // 4. Fetch market data
-    const optionData = await fetchOptionData([callToken, putToken]);
-
-    // 5. Parse data
-    const callData = optionData.find(o => o.symbolToken == callToken);
-    const putData = optionData.find(o => o.symbolToken == putToken);
-
-    if (!callData || !putData) {
-      return res.json({ success: false, message: '❌ Failed to fetch option data' });
-    }
-
-    // 6. Extract bid-ask info
-    const callBidQty = callData.depth?.buy?.[0]?.quantity || 0;
-    const callAskQty = callData.depth?.sell?.[0]?.quantity || 0;
-    const putBidQty = putData.depth?.buy?.[0]?.quantity || 0;
-    const putAskQty = putData.depth?.sell?.[0]?.quantity || 0;
-
-    // 7. Analyze strength
-    const analysis = analyzeCallVsPutStrength(atm, {
-      price: callData.ltp,
-      bidQty: callBidQty,
-      askQty: callAskQty,
-      volume: callData.tradeVolume,
-      avgVolume: callData.averageTradedPrice * 100,
-      oi: callData.opnInterest
-    }, {
-      price: putData.ltp,
-      bidQty: putBidQty,
-      askQty: putAskQty,
-      volume: putData.tradeVolume,
-      avgVolume: putData.averageTradedPrice * 100,
-      oi: putData.opnInterest
-    });
-
-    // 8. Generate signal
-    const signal = generateTradingSignal(spot, atm, analysis, callData.ltp, putData.ltp);
-
-    console.log(`✅ Signal Generated: ${analysis.strongerSide} with strength ${analysis.strengthLevel}`);
-
-    return res.json({ 
-      success: true, 
-      spot,
-      atm,
-      analysis,
-      signal,
-      callData: {
-        symbol: callSymbol,
-        price: callData.ltp,
-        bidQty: callBidQty,
-        askQty: callAskQty,
-        volume: callData.tradeVolume,
-        oi: callData.opnInterest,
-        high: callData.high,
-        low: callData.low
-      },
-      putData: {
-        symbol: putSymbol,
-        price: putData.ltp,
-        bidQty: putBidQty,
-        askQty: putAskQty,
-        volume: putData.tradeVolume,
-        oi: putData.opnInterest,
-        high: putData.high,
-        low: putData.low
-      },
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (err) {
-    console.error('❌ Signal error:', err.message);
     return res.json({ success: false, message: err.message });
   }
 });
@@ -626,6 +545,8 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`[${new Date().toISOString()}] Server started on port ${PORT}`);
   console.log(`Dashboard: http://localhost:${PORT}`);
+
+  await loadMaster();
 
   // Login on startup
   const ok = await angelLogin();
