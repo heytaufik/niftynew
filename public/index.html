@@ -1163,10 +1163,11 @@ function renderStrikes(options, strikeTotals, atm){
       <div class="metrics-grid">
         <div class="metric"><div class="metric-label">Bid Qty</div><div class="metric-value">${(opt.bidQty||0).toLocaleString()}</div></div>
         <div class="metric"><div class="metric-label">Ask Qty</div><div class="metric-value">${(opt.askQty||0).toLocaleString()}</div></div>
-        <div class="metric ${rClass}"><div class="metric-label">Bid/Ask Ratio</div><div class="metric-value">${opt.ratio}</div></div>
-        <div class="metric ${vClass}"><div class="metric-label">Volume</div><div class="metric-value">${vLabel}</div></div>
+        <div class="metric ${vClass}"><div class="metric-label">Volume</div><div class="metric-value">${(opt.volume||0).toLocaleString()}${opt.volumeSpike ? ' ⚡' : ''}</div></div>
+        <div class="metric"><div class="metric-label">OI</div><div class="metric-value">${(opt.oi||0).toLocaleString()}</div></div>
       </div>
       <div class="metrics-grid" style="margin-top:10px;">
+        <div class="metric ${rClass}" style="grid-column:1/-1;"><div class="metric-label">Bid/Ask Ratio</div><div class="metric-value">${opt.ratio}</div></div>
         <div class="metric" style="grid-column:1/-1;"><div class="metric-label">Strike Totals</div><div class="metric-value">B:${(strikeInfo.strikeTotalBidQty||0).toLocaleString()} A:${(strikeInfo.strikeTotalAskQty||0).toLocaleString()} V:${(strikeInfo.strikeTotalVolume||0).toLocaleString()} OI:${(strikeInfo.strikeTotalOi||0).toLocaleString()}</div></div>
         <div class="metric" style="grid-column:1/-1;"><div class="metric-label">${opt.type} Totals @ ${opt.strike}</div><div class="metric-value">B:${(strikeInfo.typeTotalBidQty||0).toLocaleString()} A:${(strikeInfo.typeTotalAskQty||0).toLocaleString()} V:${(strikeInfo.typeTotalVolume||0).toLocaleString()} OI:${(strikeInfo.typeTotalOi||0).toLocaleString()}</div></div>
         <div class="metric ${pClass}" style="grid-column:1/-1;"><div class="metric-label">Price Action</div><div class="metric-value">${pIcon} ${opt.priceChange>=0?'+':''}${opt.priceChange} pts</div></div>
