@@ -196,6 +196,35 @@
   .signal-card-wait { border-color:var(--yellow); }
   .signal-card-wait.active { background:rgba(255,215,0,0.05); box-shadow:var(--glow-yellow); }
   .signal-card-wait .signal-card-title { color:var(--yellow); }
+  .signal-summary {
+    display:grid;
+    grid-template-columns:repeat(2,minmax(140px,1fr));
+    gap:10px;
+    margin-top:14px;
+  }
+  .summary-item {
+    padding:10px 12px;
+    background:rgba(0,0,0,0.18);
+    border:1px solid rgba(255,255,255,0.06);
+    border-left:3px solid var(--border);
+  }
+  .summary-label {
+    font-family:var(--mono);
+    font-size:9px;
+    color:var(--text-muted);
+    letter-spacing:2px;
+    margin-bottom:6px;
+    display:block;
+  }
+  .summary-value {
+    font-family:var(--mono);
+    font-size:13px;
+    color:var(--text);
+    line-height:1.4;
+  }
+  .summary-value.strong-ce { color:var(--green); }
+  .summary-value.strong-pe { color:var(--red); }
+  .summary-value.strong-mixed { color:var(--yellow); }
   .signal-explanation {
     margin-top:12px; padding:14px; background:rgba(0,0,0,0.4);
     border-left:3px solid var(--accent); font-family:var(--mono); font-size:11px;
@@ -875,6 +904,32 @@
           <div class="signal-card-count" id="countShort">0 Active</div>
         </div>
       </div>
+      <div class="signal-summary" id="signalSummary">
+        <div class="summary-item">
+          <span class="summary-label">Virtual Trade</span>
+          <span class="summary-value" id="aggregateAction">NO CLEAR TREND</span>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">Strong Side</span>
+          <span class="summary-value strong-mixed" id="aggregateSide">MIXED</span>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">CE Aggregated Totals</span>
+          <span class="summary-value" id="aggregateCeTotals">B:0 A:0 V:0 OI:0</span>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">PE Aggregated Totals</span>
+          <span class="summary-value" id="aggregatePeTotals">B:0 A:0 V:0 OI:0</span>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">Total Bid Qty</span>
+          <span class="summary-value" id="aggregateTotalBidQty">0</span>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">Total Ask Qty</span>
+          <span class="summary-value" id="aggregateTotalAskQty">0</span>
+        </div>
+      </div>
       <div class="signal-explanation" id="signalExplanation">
         <span class="hl">// WAITING FOR ALGO START</span><br>
         Real Angel One market data will be fetched every 5 seconds.<br>
@@ -1068,9 +1123,25 @@ async function fetchMarketData(){
 // ============================================================
 //  RENDER STRIKES
 // ============================================================
-function renderStrikes(options, atm){
+function getStrikeTotalsForOption(strikeTotals, strike, type){
+  const strikeData = strikeTotals.find(item => item.strike === strike);
+  if (!strikeData) return null;
+  return {
+    strikeTotalBidQty: strikeData.totals.bidQty,
+    strikeTotalAskQty: strikeData.totals.askQty,
+    strikeTotalVolume: strikeData.totals.volume,
+    strikeTotalOi: strikeData.totals.oi,
+    typeTotalBidQty: strikeData.typeTotals[type]?.bidQty || 0,
+    typeTotalAskQty: strikeData.typeTotals[type]?.askQty || 0,
+    typeTotalVolume: strikeData.typeTotals[type]?.volume || 0,
+    typeTotalOi: strikeData.typeTotals[type]?.oi || 0,
+  };
+}
+
+function renderStrikes(options, strikeTotals, atm){
   const grid = document.getElementById('strikesGrid');
   grid.innerHTML = options.map(opt => {
+    const strikeInfo = getStrikeTotalsForOption(strikeTotals, opt.strike, opt.type) || {};
     const sig = getSignal(opt);
     const rClass = opt.ratio>1.5?'ratio-bullish':opt.ratio<0.67?'ratio-bearish':'ratio-neutral';
     const vClass = opt.volumeSpike?'vol-spike':'vol-normal';
@@ -1094,6 +1165,10 @@ function renderStrikes(options, atm){
         <div class="metric"><div class="metric-label">Ask Qty</div><div class="metric-value">${(opt.askQty||0).toLocaleString()}</div></div>
         <div class="metric ${rClass}"><div class="metric-label">Bid/Ask Ratio</div><div class="metric-value">${opt.ratio}</div></div>
         <div class="metric ${vClass}"><div class="metric-label">Volume</div><div class="metric-value">${vLabel}</div></div>
+      </div>
+      <div class="metrics-grid" style="margin-top:10px;">
+        <div class="metric" style="grid-column:1/-1;"><div class="metric-label">Strike Totals</div><div class="metric-value">B:${(strikeInfo.strikeTotalBidQty||0).toLocaleString()} A:${(strikeInfo.strikeTotalAskQty||0).toLocaleString()} V:${(strikeInfo.strikeTotalVolume||0).toLocaleString()} OI:${(strikeInfo.strikeTotalOi||0).toLocaleString()}</div></div>
+        <div class="metric" style="grid-column:1/-1;"><div class="metric-label">${opt.type} Totals @ ${opt.strike}</div><div class="metric-value">B:${(strikeInfo.typeTotalBidQty||0).toLocaleString()} A:${(strikeInfo.typeTotalAskQty||0).toLocaleString()} V:${(strikeInfo.typeTotalVolume||0).toLocaleString()} OI:${(strikeInfo.typeTotalOi||0).toLocaleString()}</div></div>
         <div class="metric ${pClass}" style="grid-column:1/-1;"><div class="metric-label">Price Action</div><div class="metric-value">${pIcon} ${opt.priceChange>=0?'+':''}${opt.priceChange} pts</div></div>
       </div>
       <span class="signal-pill ${sPill}">${sig}</span>
@@ -1121,6 +1196,32 @@ function renderSignals(options){
   if(topOpt) document.getElementById('signalExplanation').innerHTML=buildExplanation(topSig,topOpt);
   else document.getElementById('signalExplanation').innerHTML=buildExplanation('NO TRADE',options[0]);
   return {topSig,topOpt};
+}
+
+function renderAggregateSummary(suggestion) {
+  const actionEl = document.getElementById('aggregateAction');
+  const sideEl = document.getElementById('aggregateSide');
+  const ceTotalsEl = document.getElementById('aggregateCeTotals');
+  const peTotalsEl = document.getElementById('aggregatePeTotals');
+  const totalBidQtyEl = document.getElementById('aggregateTotalBidQty');
+  const totalAskQtyEl = document.getElementById('aggregateTotalAskQty');
+
+  actionEl.textContent = suggestion.suggestedAction;
+  sideEl.textContent = suggestion.strongerSide;
+  sideEl.className = `summary-value ${suggestion.strongerSide==='CE'?'strong-ce':suggestion.strongerSide==='PE'?'strong-pe':'strong-mixed'}`;
+
+  const totalBidQty = suggestion.aggregates.side.CE.bidQty + suggestion.aggregates.side.PE.bidQty;
+  const totalAskQty = suggestion.aggregates.side.CE.askQty + suggestion.aggregates.side.PE.askQty;
+
+  ceTotalsEl.textContent = `B:${suggestion.aggregates.side.CE.bidQty.toLocaleString()} A:${suggestion.aggregates.side.CE.askQty.toLocaleString()} V:${suggestion.aggregates.side.CE.volume.toLocaleString()} OI:${suggestion.aggregates.side.CE.oi.toLocaleString()}`;
+  peTotalsEl.textContent = `B:${suggestion.aggregates.side.PE.bidQty.toLocaleString()} A:${suggestion.aggregates.side.PE.askQty.toLocaleString()} V:${suggestion.aggregates.side.PE.volume.toLocaleString()} OI:${suggestion.aggregates.side.PE.oi.toLocaleString()}`;
+  totalBidQtyEl.textContent = totalBidQty.toLocaleString();
+  totalAskQtyEl.textContent = totalAskQty.toLocaleString();
+}
+
+function selectBestOptionForSide(options, side) {
+  const filtered = options.filter(opt => opt.type === side);
+  return filtered.sort((a,b) => (b.strengthScore || 0) - (a.strengthScore || 0))[0] || null;
 }
 
 // ============================================================
@@ -1243,7 +1344,7 @@ async function scan(){
   document.getElementById('statusText').style.color = open?'var(--green)':'var(--yellow)';
 
   try {
-    const {spot, atm, options} = await fetchMarketData();
+    const {spot, atm, options, suggestion} = await fetchMarketData();
 
     // Update header
     document.getElementById('niftyPrice').textContent = spot.toFixed(2);
@@ -1260,17 +1361,22 @@ async function scan(){
     document.getElementById('itm1CE').textContent    = `${atm-50}`;
     document.getElementById('itm1PE').textContent    = `${atm+50}`;
 
-    renderStrikes(options, atm);
+    renderStrikes(options, suggestion.strikeTotals || [], atm);
     const {topSig, topOpt} = renderSignals(options);
+    renderAggregateSummary(suggestion);
 
     // Status dot — connected
     if(open){
       document.getElementById('statusDot').className='status-dot';
     }
 
-    // Auto demo trade — only during market hours
-    if(open && topSig && topSig!=='NO TRADE'){
-      createTrade(topSig, topOpt);
+    // Auto demo trade — only during market hours and based on total CE/PE pressure
+    if(open && suggestion.virtualTrade){
+      const sig = suggestion.strongerSide === 'CE' ? 'LONG' : suggestion.strongerSide === 'PE' ? 'SHORT' : null;
+      const tradeOpt = sig ? selectBestOptionForSide(options, suggestion.strongerSide) : null;
+      if(sig && tradeOpt){
+        createTrade(sig, tradeOpt);
+      }
     }
 
     if(!open){
